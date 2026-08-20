@@ -1,10 +1,10 @@
 using System;
-using System.Reflection;
+using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using HarmonyLib;
 using SFS.Builds;
 using SFS.Input;
-using SFS.IO;
 using SFS.Parts;
 using SFS.Parts.Modules;
 using SFS.Translations;
@@ -19,7 +19,7 @@ namespace BlueprintImage
 		static bool Prefix(DownloadMenu __instance)
 		{
 			SizeSyncerBuilder.Carrier sizeSync;
-			System.Collections.Generic.List<MenuElement> list = new System.Collections.Generic.List<MenuElement>
+			List<MenuElement> list = new List<MenuElement>
 			{
 				new SizeSyncerBuilder(out sizeSync).HorizontalMode(SizeMode.MaxChildSize)
 			};
@@ -46,19 +46,20 @@ namespace BlueprintImage
 		static void ShowExportOptions()
 		{
 			SizeSyncerBuilder.Carrier sizeSync;
-			System.Collections.Generic.List<MenuElement> list = new System.Collections.Generic.List<MenuElement>
+			List<MenuElement> list = new List<MenuElement>
 			{
 				new SizeSyncerBuilder(out sizeSync).HorizontalMode(SizeMode.MaxChildSize)
 			};
 
 			list.Add(ButtonBuilder.CreateButton(sizeSync, () => Field.Text("Export with Blue Background"), new Action(() => ExportBlueprintImage(false)), CloseMode.Current).MinSize(300f, 60f));
 			list.Add(ButtonBuilder.CreateButton(sizeSync, () => Field.Text("Export with Transparent Background"), new Action(() => ExportBlueprintImage(true)), CloseMode.Current).MinSize(300f, 60f));
+			list.Add(ButtonBuilder.CreateButton(sizeSync, () => Field.Text("Export with Green Background"), new Action(() => ExportBlueprintImage(false, true)), CloseMode.Current).MinSize(300f, 60f));
 			list.Add(ButtonBuilder.CreateButton(sizeSync, () => Loc.main.Cancel, delegate { }, CloseMode.Current).MinSize(300f, 60f));
 
 			ScreenManager.main.OpenScreen(MenuGenerator.CreateMenu(CancelButton.Cancel, CloseMode.Current, delegate { }, delegate { }, list.ToArray()));
 		}
 
-		static void ExportBlueprintImage(bool transparentBackground)
+		static void ExportBlueprintImage(bool transparentBackground, bool greenBackground = false)
 		{
 			try
 			{
@@ -69,8 +70,7 @@ namespace BlueprintImage
 					return;
 				}
 
-				// Compute adaptive width/height from blueprint bounds
-				SFS.Parts.Modules.OwnershipState[] ownershipStates;
+				OwnershipState[] ownershipStates;
 				Part[] tempParts = PartsLoader.CreateParts(blueprint.parts, null, null, OnPartNotOwned.Allow, out ownershipStates);
 				Rect rect;
 				Part_Utility.GetFramingBounds_WorldSpace(out rect, tempParts);
@@ -83,61 +83,70 @@ namespace BlueprintImage
 					}
 				}
 
-				// Add small padding similar to sharing preview
+				//按蓝图边界计算尺寸
 				float paddedWidth = rect.width + 2f;
 				float paddedHeight = rect.height + 2f;
 				
 				float pixelsPerUnit = 100f;
 				int width = Mathf.Max(256, Mathf.RoundToInt(paddedWidth * pixelsPerUnit));
 				int height = Mathf.Max(256, Mathf.RoundToInt(paddedHeight * pixelsPerUnit));
+				
+				//限制最大尺寸并保持宽高比
+				const int maxDimension = 7500;
+				if (width > maxDimension || height > maxDimension)
+				{
+					float scale = Mathf.Min((float)maxDimension / width, (float)maxDimension / height);
+					width = Mathf.RoundToInt(width * scale);
+					height = Mathf.RoundToInt(height * scale);
+				}
 
-				// 根据选择使用不同的背景颜色
 				RenderTexture iconRT;
 				if (transparentBackground)
-				{
 					iconRT = CreatePartIconWithBackground(blueprint, width, height, Color.clear);
-				}
+				else if (greenBackground)
+					iconRT = CreatePartIconWithBackground(blueprint, width, height, Color.green);
 				else
-				{
 					iconRT = PartIconCreator.main.CreatePartIcon_Sharing(blueprint, width, height);
-				}
 				
 				Texture2D tex = ImageTools.RenderTextureTo2D(iconRT, width, height);
 
-				// Save directly under the game root directory (parent of BaseFolder)
-				string baseFolder = FileLocations.BaseFolder.ToString();
-				string gameRoot = Path.GetDirectoryName(baseFolder);
-				FolderPath imagesFolder = new FolderPath(gameRoot).Extend("BPimages").CreateFolder();
-				string fileName = DateTime.Now.ToString("yyyyMMdd_HHmmss") + (transparentBackground ? "_transparent" : "_blue") + ".png";
-				FilePath filePath = imagesFolder.ExtendToFile(FilePath.CleanupName(fileName));
-				tex.SaveToFile(filePath);
+				//保存到Mod文件夹内
+				string folderPath = Path.Combine(SettingsManager.GetModFolder(), "BPimages");
+				Directory.CreateDirectory(folderPath);
+				string fileName = DateTime.Now.ToString("yyyyMMdd_HHmmss") + 
+					(transparentBackground ? "_transparent" : 
+					 greenBackground ? "_green" : "_blue") + ".png";
+				string filePath = Path.Combine(folderPath, fileName);
+				File.WriteAllBytes(filePath, tex.EncodeToPNG());
 
-				MsgDrawer.main.Log("Saved blueprint image: " + (string)filePath);
+				MsgDrawer.main.Log("Saved blueprint image: " + filePath);
 			}
 			catch (Exception ex)
 			{
 				Console.WriteLine(ex);
-				MsgDrawer.main.Log("Failed to export blueprint image");
+				MsgDrawer.main.Log("Failed to export blueprint image: " + ex.Message);
 			}
 		}
 
-		// 创建带自定义背景的蓝图图标
 		static RenderTexture CreatePartIconWithBackground(Blueprint blueprint, int width, int height, Color backgroundColor)
 		{
-			// 参考 PartIconCreator 的实现
-			SFS.Parts.Modules.OwnershipState[] ownershipStates;
+			OwnershipState[] ownershipStates;
 			Part[] tempParts = PartsLoader.CreateParts(blueprint.parts, null, null, OnPartNotOwned.Allow, out ownershipStates);
 			Rect rect;
 			Part_Utility.GetFramingBounds_WorldSpace(out rect, tempParts);
-			
-			// 添加边距
-			Vector2 vector = Vector2.one * 2f;
-			rect = new Rect(rect.position - vector / 2f, rect.size + vector);
-			
-			// 反射调用 RenderAndDestroy
+			Vector2 v = Vector2.one * 2f;
+			rect = new Rect(rect.position - v / 2f, rect.size + v);
 			var method = typeof(PartIconCreator).GetMethod("RenderAndDestroy", 
-				System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+				BindingFlags.NonPublic | BindingFlags.Instance);
 			return (RenderTexture)method.Invoke(PartIconCreator.main, new object[] { tempParts, rect, width, height, backgroundColor });
 		}
+		/*
+		static string GetGameRoot()
+		{
+			var prop = typeof(FileLocations).GetProperty("BaseFolder");
+			object folder = prop != null ? prop.GetValue(null) : typeof(FileLocations).GetMethod("GetBaseFolder").Invoke(null, null);
+			return folder != null ? folder.ToString() : "";
+		}
+		*/
 	}
 }
